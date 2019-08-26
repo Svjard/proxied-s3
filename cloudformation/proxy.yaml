@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  BucketName:
+    Type: String
+Resources:
+  # S3 Bucket that is used for the proxy
+  ProxyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+  
+  S3ProxyServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Action: "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+      Policies:
+        - 
+          PolicyName: UploadBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Sid: "UploadToS3Bucket"
+                Effect: Allow
+                Action: 
+                  - "s3:PutObject"
+                Resource: !Sub
+                  - arn:aws:s3:::${proxyBucket}/*
+                  - proxyBucket: !Ref BucketName
+
+  ###############
+  # API Gateway #
+  ###############
+
+  ProxyApiGateway:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name: "ProxyS3Api"
+      Description: "An API to proxy to S3"
+      BinaryMediaTypes:
+        - "plain/text"
+      EndpointConfiguration:
+        Types:
+          - EDGE
+
+  ApiGatewayBucketResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref ProxyApiGateway
+      ParentId: !GetAtt ProxyApiGateway.RootResourceId
+      PathPart: "{bucket}"
+
+  ApiGatewayFolderResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref ProxyApiGateway
+      ParentId: !Ref ApiGatewayBucketResource
+      PathPart: "{folder}"
+
+  ApiGatewayItemResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref ProxyApiGateway
+      ParentId: !Ref ApiGatewayFolderResource
+      PathPart: "{item}"
+
+  ApiGatewayItemPutMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref ProxyApiGateway
+      ResourceId: !Ref ApiGatewayItemResource
+      HttpMethod: "PUT"
+      AuthorizationType: "AWS_IAM"
+      ApiKeyRequired: false
+      RequestParameters:
+        "method.request.header.Accept": false
+        "method.request.header.Content-Type": false
+        "method.request.header.x-amz-meta-fileinfo": false
+        "method.request.path.bucket": true
+        "method.request.path.folder": true
+        "method.request.path.item": true
+      Integration:
+        IntegrationHttpMethod: "PUT"
+        Type: "AWS"
+        Credentials: !GetAtt S3ProxyServiceRole.Arn
+        Uri: "arn:aws:apigateway:us-east-1:s3:path/{bucket}/{folder}/{item}"
+        RequestParameters:
+          "integration.request.header.x-amz-meta-fileinfo": "method.request.header.x-amz-meta-fileinfo"
+          "integration.request.header.Accept": "method.request.header.Accept"
+          "integration.request.header.Content-Type": "method.request.header.Content-Type"
+          "integration.request.path.item": "method.request.path.item"
+          "integration.request.path.folder": "method.request.path.folder"
+          "integration.request.path.bucket": "method.request.path.bucket"
+        IntegrationResponses:
+          -
+            StatusCode: "200"
+            ResponseTemplates:
+              "application/json": ""
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+      MethodResponses:
+        -
+          StatusCode: "200"
+          ResponseModels:
+            "application/json": "Empty"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Origin": true
+
+  ApiGatewayItemOptionsMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref ProxyApiGateway
+      ResourceId: !Ref ApiGatewayItemResource
+      HttpMethod: "OPTIONS"
+      AuthorizationType: "NONE"
+      RequestParameters:
+        "method.request.header.x-amz-meta-fileinfo": false
+      Integration:
+        IntegrationHttpMethod: "OPTIONS"
+        Type: "MOCK"
+        RequestTemplates:
+          "application/json": "{\n \"statusCode\": 200\n}"
+        IntegrationResponses:
+          -
+            StatusCode: "200"
+            ResponseTemplates:
+              "application/json": ""
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-amz-meta-fileinfo'"
+              "method.response.header.Access-Control-Allow-Methods": "'PUT,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+      MethodResponses:
+        -
+          StatusCode: "200"
+          ResponseModels:
+            "application/json": "Empty"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": true
+            "method.response.header.Access-Control-Allow-Methods": true
+            "method.response.header.Access-Control-Allow-Origin": true
+
+  ApiGatewayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn:
+      - ApiGatewayItemOptionsMethod
+      - ApiGatewayItemPutMethod
+    Properties:
+      RestApiId: !Ref ProxyApiGateway
+      StageName: "production"
+
+Outputs:
+  ApiGatewayInvokeURL:
+    Value: !Sub "https://${ProxyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/production"
